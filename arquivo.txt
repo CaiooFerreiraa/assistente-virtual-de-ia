@@ -1,0 +1,5 @@
+  python -m Config.transcription_store add-exact "espachai" "spotify"                                 
+                                                                                                      
+  Adicionar artista/nome aproximado para LCS:                                                         
+                                                                                                      
+  python -m Config.transcription_store add-fuzzy "Akashi Cruz" 0.62  

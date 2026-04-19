@@ -8,8 +8,17 @@ def prompt_system():
     - Você tem acesso a algumas ferramentas para controlar o Spotify do usuário.
     - Use as ferramentas para controlar o Spotify do usuário.
     - abrir_spotify
+    - abrir_busca_spotify
+    - abrir_uri_spotify
     - fechar_spotify
+    - listar_dispositivos
+    - listar_minhas_playlists
+    - listar_musicas_curtidas
+    - listar_artistas_seguidos
+    - listar_meus_artistas
+    - buscar_playlist
     - tocar_musica
+    - dar_play
     - pausar_musica
     - proxima_musica
     - musica_anterior
@@ -17,6 +26,8 @@ def prompt_system():
     - diminuir_volume
     - volume_atual
     - tocar_playlist
+    - tocar_playlist_a_partir_de_musica
+    - tocar_musicas_curtidas
     - tocar_album
     - tocar_artista
 

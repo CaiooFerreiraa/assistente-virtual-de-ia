@@ -1,0 +1,45 @@
+# Correcoes de transcricao.
+# Edite este arquivo enquanto o watch.py estiver rodando; o agente recarrega quando salvar.
+#
+# Formato:
+# [exact]
+# texto errado => texto correto
+#
+# [fuzzy]
+# termo correto => limite
+#
+# Dica:
+# - exact e para erros recorrentes do Whisper.
+# - fuzzy e para nomes/artistas que podem chegar parecidos.
+# - limite menor corrige mais, mas pode errar mais. Comece entre 0.58 e 0.72.
+
+[exact]
+espachai => spotify
+spotifai => spotify
+spotfy => spotify
+estiu => Steel
+estil => Steel
+still => Steel
+stil => Steel
+mosca => música
+cache cruise => Akashi Cruz
+akashi cruise => Akashi Cruz
+sistema fandal => system of a down
+sistema fandals => system of a down
+caixa cruz => Akashi Cruz
+Cache Cruz => Akashi Cruz
+Kashi Cruz => Akashi Cruz
+Acácio Cruz => Akashi Cruz
+Acacio Cruz => Akashi Cruz
+Tox City. => Toxcity
+Toxiri => Toxcity
+toxiti => Toxcity
+
+[fuzzy]
+Spotify => 0.72
+Steel => 0.58
+Akashi Cruz => 0.62
+System of a Down => 0.58
+Toxcity => 0.48
+Legião Urbana => 0.68
+Filho do Piseiro => 0.68
