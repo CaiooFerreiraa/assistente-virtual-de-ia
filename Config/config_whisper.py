@@ -13,16 +13,22 @@ except ImportError:
 
 _model = None
 DEFAULT_MIC_DEVICE_NAME = "WO Mic"
+DEFAULT_WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
+WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "auto").strip()
+WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "1"))
 MIN_AUDIO_RMS = 0.002
 DEFAULT_SILENCE_SECONDS = 1.0
 DEFAULT_VOICE_THRESHOLD = 0.008
 NOISE_MULTIPLIER = 3.0
 PRE_SPEECH_CHUNKS = 3
 WHISPER_INITIAL_PROMPT = (
-  "Comandos em portugues para o assistente Steel controlar o Spotify. "
-  "Palavras comuns: Steel, Estil, Estiu, Spotify, abrir Spotify, fechar Spotify, "
-  "tocar musica, pausar musica, proxima musica, musica anterior, aumentar volume, "
-  "diminuir volume, tocar Legiao Urbana, tocar Sistema Fandals."
+  "Transcreva exatamente o audio. Nao traduza nomes de musicas, artistas, bandas "
+  "ou palavras em ingles para portugues. Preserve nomes proprios como aparecem no "
+  "Spotify. O usuario fala portugues com nomes de musicas e artistas em ingles. "
+  "Comandos comuns: Steel, Spotify, abrir Spotify, fechar Spotify, tocar musica, "
+  "pausar musica, proxima musica, musica anterior, aumentar volume, diminuir volume. "
+  "Nomes frequentes: Akashi Cruz, System Of A Down, Toxicity, TOXIQUE, Legiao Urbana, "
+  "BK, Luccas Carlos."
 )
 DEVICE_HOST_API_PREFERENCE = [
   "Windows WASAPI",
@@ -35,8 +41,32 @@ DEVICE_HOST_API_PREFERENCE = [
 def get_whisper_model():
   global _model
   if _model is None:
-    _model = whisper.load_model("small")
+    _model = whisper.load_model(DEFAULT_WHISPER_MODEL)
   return _model
+
+
+def _transcription_language() -> str | None:
+  if WHISPER_LANGUAGE.lower() in ["", "auto", "detect"]:
+    return None
+
+  return WHISPER_LANGUAGE
+
+
+def _transcription_options() -> dict:
+  options = {
+    "task": "transcribe",
+    "fp16": False,
+    "condition_on_previous_text": False,
+    "initial_prompt": WHISPER_INITIAL_PROMPT,
+    "temperature": 0,
+    "beam_size": max(1, WHISPER_BEAM_SIZE),
+  }
+  language = _transcription_language()
+
+  if language is not None:
+    options["language"] = language
+
+  return options
 
 
 def transcribe_audio(audio_path: str | Path) -> str:
@@ -45,7 +75,7 @@ def transcribe_audio(audio_path: str | Path) -> str:
     return transcribe_audio_data(load_wav_audio(audio_path))
 
   model = get_whisper_model()
-  result = model.transcribe(str(audio_path), language="pt", fp16=False)
+  result = model.transcribe(str(audio_path), **_transcription_options())
   return result["text"].strip()
 
 
@@ -57,11 +87,7 @@ def transcribe_audio_data(audio: np.ndarray) -> str:
   model = get_whisper_model()
   result = model.transcribe(
     audio,
-    language="pt",
-    fp16=False,
-    condition_on_previous_text=False,
-    initial_prompt=WHISPER_INITIAL_PROMPT,
-    temperature=0,
+    **_transcription_options(),
   )
   return clean_transcription(result["text"])
 

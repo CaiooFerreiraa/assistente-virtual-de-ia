@@ -8,6 +8,8 @@ class SpotifyToolsTest(unittest.TestCase):
   def setUp(self):
     spotify._client_credentials_token.clear()
     spotify._user_token.clear()
+    spotify._personal_track_catalog_cache["expires_at"] = 0.0
+    spotify._personal_track_catalog_cache["tracks"] = []
 
   @patch("Tools.spotify.platform.system", return_value="Windows")
   @patch("Tools.spotify._windows_process_ids", return_value=set())
@@ -245,7 +247,8 @@ class SpotifyToolsTest(unittest.TestCase):
   @patch("Tools.spotify._spotify_user_request")
   @patch("Tools.spotify._require_spotify_device", return_value="device-1")
   @patch("Tools.spotify._spotify_get")
-  def test_tocar_musica(self, spotify_get, _, user_request):
+  @patch("Tools.spotify._buscar_musica_no_catalogo_pessoal", return_value=None)
+  def test_tocar_musica(self, _, spotify_get, __, user_request):
     spotify_get.return_value = {
       "tracks": {
         "items": [
@@ -268,10 +271,217 @@ class SpotifyToolsTest(unittest.TestCase):
       body={"uris": ["spotify:track:1"]},
     )
 
+  @patch("Tools.spotify._spotify_user_request")
+  @patch("Tools.spotify._require_spotify_device", return_value="device-1")
   @patch("Tools.spotify._spotify_get")
-  def test_tocar_musica_empty_result(self, spotify_get):
+  @patch("Tools.spotify._buscar_musica_no_catalogo_pessoal", return_value=None)
+  def test_tocar_musica_prefers_track_name_over_artist_only_match(self, _, spotify_get, __, user_request):
+    spotify_get.return_value = {
+      "tracks": {
+        "items": [
+          {
+            "name": "Aerials",
+            "uri": "spotify:track:aerials",
+            "artists": [{"name": "System Of A Down"}],
+          },
+          {
+            "name": "Toxicity",
+            "uri": "spotify:track:toxicity",
+            "artists": [{"name": "System Of A Down"}],
+          },
+        ]
+      }
+    }
+
+    result = spotify.tocar_musica("Toxicity System of a Down down")
+
+    self.assertEqual(result, "Tocando Toxicity - System Of A Down.")
+    user_request.assert_called_once_with(
+      "/me/player/play",
+      method="PUT",
+      params={"device_id": "device-1"},
+      body={"uris": ["spotify:track:toxicity"]},
+    )
+
+  @patch("Tools.spotify._spotify_get")
+  @patch("Tools.spotify._spotify_user_request")
+  @patch("Tools.spotify._require_spotify_device", return_value="device-1")
+  def test_tocar_musica_prefers_personal_catalog_before_public_search(self, _, user_request, spotify_get):
+    user_request.side_effect = [
+      {
+        "items": [
+          {
+            "track": {
+              "name": "Toxicity",
+              "uri": "spotify:track:toxicity",
+              "artists": [{"name": "System Of A Down"}],
+            }
+          }
+        ],
+        "next": None,
+      },
+      {"items": []},
+      {},
+    ]
+
+    result = spotify.tocar_musica("Sistema Fandals, Toxiri")
+
+    self.assertEqual(result, "Tocando Toxicity - System Of A Down.")
+    spotify_get.assert_not_called()
+    user_request.assert_called_with(
+      "/me/player/play",
+      method="PUT",
+      params={"device_id": "device-1"},
+      body={"uris": ["spotify:track:toxicity"]},
+    )
+
+  @patch("Tools.spotify._spotify_get", return_value={"tracks": {"items": []}})
+  @patch("Tools.spotify._spotify_user_request")
+  @patch("Tools.spotify._require_spotify_device")
+  def test_tocar_musica_does_not_accept_artist_only_match_when_title_is_given(self, require_device, user_request, _):
+    user_request.side_effect = [
+      {
+        "items": [
+          {
+            "track": {
+              "name": "Quem é você?",
+              "uri": "spotify:track:quem-e-voce",
+              "artists": [{"name": "Akashi Cruz"}],
+            }
+          }
+        ],
+        "next": None,
+      },
+      {"items": []},
+    ]
+
+    self.assertEqual(
+      spotify.tocar_musica("Toxi, Akashi Cruz"),
+      "Nenhuma musica encontrada.",
+    )
+    require_device.assert_not_called()
+
+  @patch("Tools.spotify._spotify_get")
+  @patch("Tools.spotify._spotify_user_request")
+  @patch("Tools.spotify._require_spotify_device", return_value="device-1")
+  def test_tocar_musica_matches_title_and_artist_when_both_are_given(self, _, user_request, spotify_get):
+    spotify_get.return_value = {"tracks": {"items": []}}
+    user_request.side_effect = [
+      {
+        "items": [
+          {
+            "track": {
+              "name": "Quem é você?",
+              "uri": "spotify:track:quem-e-voce",
+              "artists": [{"name": "Akashi Cruz"}],
+            }
+          },
+          {
+            "track": {
+              "name": "Toxicity",
+              "uri": "spotify:track:toxicity",
+              "artists": [{"name": "Akashi Cruz"}],
+            }
+          },
+        ],
+        "next": None,
+      },
+      {"items": []},
+      {},
+    ]
+
+    self.assertEqual(
+      spotify.tocar_musica("Toxi, Akashi Cruz"),
+      "Tocando Toxicity - Akashi Cruz.",
+    )
+    user_request.assert_called_with(
+      "/me/player/play",
+      method="PUT",
+      params={"device_id": "device-1"},
+      body={"uris": ["spotify:track:toxicity"]},
+    )
+
+  @patch("Tools.spotify._spotify_user_request")
+  @patch("Tools.spotify._require_spotify_device", return_value="device-1")
+  @patch("Tools.spotify._spotify_get")
+  @patch("Tools.spotify._buscar_musica_no_catalogo_pessoal", return_value=None)
+  def test_tocar_musica_tries_fragments_when_transcription_translates_english(self, _, spotify_get, __, user_request):
+    spotify_get.side_effect = [
+      {"tracks": {"items": []}},
+      {
+        "tracks": {
+          "items": [
+            {
+              "name": "Sistema Caipira",
+              "uri": "spotify:track:sistema-caipira",
+              "artists": [{"name": "Eduardo Costa"}],
+            }
+          ]
+        }
+      },
+      {
+        "tracks": {
+          "items": [
+            {
+              "name": "Sistema Caipira",
+              "uri": "spotify:track:sistema-caipira",
+              "artists": [{"name": "Eduardo Costa"}],
+            }
+          ]
+        }
+      },
+      {
+        "tracks": {
+          "items": [
+            {
+              "name": "Toxicity",
+              "uri": "spotify:track:toxicity",
+              "artists": [{"name": "System Of A Down"}],
+            }
+          ]
+        }
+      },
+    ]
+
+    result = spotify.tocar_musica("Sistema Fandals, Toxiri")
+
+    self.assertEqual(result, "Tocando Toxicity - System Of A Down.")
+    self.assertEqual(
+      [call.kwargs["body"]["uris"][0] for call in user_request.call_args_list if call.args[0] == "/me/player/play"],
+      ["spotify:track:toxicity"],
+    )
+    self.assertEqual(
+      [call.args[1]["q"] for call in spotify_get.call_args_list],
+      ["Toxiri", "Sistema Fandals", "Sistema Fandals, Toxiri", "toxi"],
+    )
+
+  @patch("Tools.spotify._spotify_get")
+  @patch("Tools.spotify._buscar_musica_no_catalogo_pessoal", return_value=None)
+  def test_tocar_musica_empty_result(self, _, spotify_get):
     spotify_get.return_value = {"tracks": {"items": []}}
     self.assertEqual(spotify.tocar_musica("nada"), "Nenhuma musica encontrada.")
+
+  @patch("Tools.spotify._require_spotify_device")
+  @patch("Tools.spotify._spotify_get")
+  @patch("Tools.spotify._buscar_musica_no_catalogo_pessoal", return_value=None)
+  def test_tocar_musica_does_not_play_low_confidence_match(self, _, spotify_get, require_device):
+    spotify_get.return_value = {
+      "tracks": {
+        "items": [
+          {
+            "name": "Sistema Caipira",
+            "uri": "spotify:track:sistema-caipira",
+            "artists": [{"name": "Eduardo Costa"}],
+          }
+        ]
+      }
+    }
+
+    self.assertEqual(
+      spotify.tocar_musica("Sistema Fandals, Toxiri"),
+      "Nao encontrei uma musica parecida com Sistema Fandals, Toxiri.",
+    )
+    require_device.assert_not_called()
 
   @patch("Tools.spotify._spotify_user_request")
   @patch("Tools.spotify._require_spotify_device", return_value="device-1")

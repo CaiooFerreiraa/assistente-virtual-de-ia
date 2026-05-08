@@ -115,6 +115,23 @@ def remove_wake_words(message: str) -> str:
   return normalize_message(re.sub(pattern, " ", message, flags=re.IGNORECASE))
 
 
+def remove_repeated_adjacent_words(message: str) -> str:
+  words = normalize_message(message).split()
+  deduped_words = []
+  previous_normalized_word = None
+
+  for word in words:
+    normalized_word = normalize_for_match(word)
+
+    if normalized_word and normalized_word == previous_normalized_word:
+      continue
+
+    deduped_words.append(word)
+    previous_normalized_word = normalized_word
+
+  return normalize_message(" ".join(deduped_words))
+
+
 def clean_music_query(message: str) -> str:
   query = remove_wake_words(message)
   query = re.sub(
@@ -128,7 +145,14 @@ def clean_music_query(message: str) -> str:
   for filler in MUSIC_FILLERS:
     query = re.sub(re.escape(filler), " ", query, flags=re.IGNORECASE)
 
-  return normalize_message(query)
+  query = re.sub(
+    r"^\s*(a|uma|musica|música)\b",
+    " ",
+    query,
+    flags=re.IGNORECASE,
+  )
+
+  return remove_repeated_adjacent_words(query)
 
 
 def clean_playlist_query(message: str) -> str:

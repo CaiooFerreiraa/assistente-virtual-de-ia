@@ -1,6 +1,7 @@
 import unittest
 
 from Domain.voice_commands import (
+  clean_music_query,
   clean_playlist_query,
   extract_message_after_wake_word,
   extract_playlist_track_request,
@@ -18,6 +19,18 @@ class VoiceCommandsTest(unittest.TestCase):
     self.assertEqual(
       clean_playlist_query("Steel toca a minha playlist Best Musics"),
       "Best Musics",
+    )
+
+  def test_clean_music_query_removes_repeated_transcription_tail(self):
+    self.assertEqual(
+      clean_music_query("Steel toca Toxicity System of a Down down."),
+      "Toxicity System of a Down",
+    )
+
+  def test_clean_music_query_removes_music_word_prefix(self):
+    self.assertEqual(
+      clean_music_query("Steel toca música Toxy de Acacicruz."),
+      "Toxy de Acacicruz",
     )
 
   def test_extract_playlist_track_request(self):

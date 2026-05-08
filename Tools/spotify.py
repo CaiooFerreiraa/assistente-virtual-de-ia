@@ -7,7 +7,6 @@ from urllib.error import HTTPError
 import argparse
 import base64
 import ctypes
-import difflib
 import json
 import os
 import platform
@@ -18,10 +17,24 @@ import unicodedata
 import webbrowser
 from ctypes import wintypes
 
+from Config.transcription_fixes import lcs_similarity
+
 load_dotenv()
 
 _client_credentials_token: dict[str, str | float] = {}
 _user_token: dict[str, str | float] = {}
+MIN_TRACK_MATCH_SCORE = 50
+MIN_PERSONAL_TRACK_MATCH_SCORE = 55
+MIN_STRUCTURED_TITLE_MATCH_SCORE = 45
+MIN_STRUCTURED_ARTIST_MATCH_SCORE = 25
+PERSONAL_CATALOG_TTL_SECONDS = 600
+PERSONAL_CATALOG_SAVED_TRACK_LIMIT = 300
+PERSONAL_CATALOG_PLAYLIST_LIMIT = 20
+PERSONAL_CATALOG_PLAYLIST_TRACK_LIMIT = 100
+_personal_track_catalog_cache: dict[str, object] = {
+  "expires_at": 0.0,
+  "tracks": [],
+}
 SPOTIFY_SCOPES = [
   "user-read-playback-state",
   "user-modify-playback-state",
@@ -529,6 +542,9 @@ def _normalize_spotify_name(name: str) -> str:
   words = []
 
   for word in normalized.split():
+    if word == "s":
+      continue
+
     if len(word) > 3 and word.endswith("s"):
       word = word[:-1]
     words.append(word)
@@ -536,9 +552,149 @@ def _normalize_spotify_name(name: str) -> str:
   return " ".join(words)
 
 
+def _remove_adjacent_duplicate_words(text: str) -> str:
+  words = text.split()
+  deduped_words = []
+  previous_word = None
+
+  for word in words:
+    if word == previous_word:
+      continue
+
+    deduped_words.append(word)
+    previous_word = word
+
+  return " ".join(deduped_words)
+
+
+def _longest_common_substring_score(left: str, right: str) -> int:
+  return int(lcs_similarity(left, right) * 100)
+
+
+def _unique_texts(values: list[str]) -> list[str]:
+  unique_values = []
+  seen = set()
+
+  for value in values:
+    normalized = _normalize_spotify_name(value)
+    if not normalized or normalized in seen:
+      continue
+
+    unique_values.append(value.strip(" ,.!?:;\n\t"))
+    seen.add(normalized)
+
+  return unique_values
+
+
+def _track_search_queries(query: str) -> list[str]:
+  query = query.strip(" ,.!?:;\n\t")
+  if not query:
+    return []
+
+  split_parts = [
+    part.strip(" ,.!?:;\n\t")
+    for part in re.split(r"[,;:/|]+", query)
+    if part.strip(" ,.!?:;\n\t")
+  ]
+  queries = []
+
+  if len(split_parts) > 1:
+    queries.extend(reversed(split_parts))
+
+  queries.append(query)
+  queries.extend(split_parts)
+
+  for part in split_parts or [query]:
+    words = _normalize_spotify_name(part).split()
+    if len(words) == 1 and len(words[0]) >= 6:
+      queries.append(words[0][:4])
+
+  return _unique_texts(queries)
+
+
+def _structured_track_query_parts(query: str) -> list[str]:
+  query = query.strip(" ,.!?:;\n\t")
+  if not query:
+    return []
+
+  separator_parts = [
+    part.strip(" ,.!?:;\n\t")
+    for part in re.split(r"[,;:/|]+", query)
+    if part.strip(" ,.!?:;\n\t")
+  ]
+  if len(separator_parts) >= 2:
+    return _unique_texts(separator_parts)
+
+  match = re.search(r"(.+?)\s+de\s+(.+)", query, flags=re.IGNORECASE)
+  if match is not None:
+    return _unique_texts([match.group(1), match.group(2)])
+
+  return []
+
+
+def _structured_track_assignment_score(
+  parts: list[str],
+  track_name: str,
+  artists: str,
+) -> int:
+  if len(parts) < 2:
+    return 0
+
+  best_score = 0
+
+  for title_part in parts:
+    title_variants = [title_part]
+    title_words = _normalize_spotify_name(title_part).split()
+    if len(title_words) == 1 and len(title_words[0]) >= 6:
+      title_variants.append(title_words[0][:4])
+
+    title_score = max(_playlist_score(variant, track_name) for variant in title_variants)
+    if title_score < MIN_STRUCTURED_TITLE_MATCH_SCORE:
+      continue
+
+    for artist_part in parts:
+      if artist_part == title_part:
+        continue
+
+      artist_score = _playlist_score(artist_part, artists)
+      if artist_score < MIN_STRUCTURED_ARTIST_MATCH_SCORE:
+        continue
+
+      best_score = max(
+        best_score,
+        min(100, title_score + min(15, artist_score // 6)),
+      )
+
+  return best_score
+
+
+def _track_search_score(original_query: str, search_query: str, track: dict) -> int:
+  if _structured_track_query_parts(original_query):
+    return _track_score(original_query, track)
+
+  return max(
+    _track_score(original_query, track),
+    _track_score(search_query, track),
+  )
+
+
+def _personal_track_score(query: str, track: dict) -> int:
+  if _structured_track_query_parts(query):
+    return _track_score(query, track)
+
+  search_queries = _track_search_queries(query)
+  if not search_queries:
+    return 0
+
+  return max(
+    _track_score(search_query, track)
+    for search_query in search_queries
+  )
+
+
 def _playlist_score(query: str, playlist_name: str) -> int:
-  query = _normalize_spotify_name(query)
-  playlist_name = _normalize_spotify_name(playlist_name)
+  query = _remove_adjacent_duplicate_words(_normalize_spotify_name(query))
+  playlist_name = _remove_adjacent_duplicate_words(_normalize_spotify_name(playlist_name))
 
   if query == playlist_name:
     return 100
@@ -554,9 +710,9 @@ def _playlist_score(query: str, playlist_name: str) -> int:
     return 0
 
   word_score = int((len(common_words) / len(query_words)) * 80)
-  fuzzy_score = int(difflib.SequenceMatcher(None, query, playlist_name).ratio() * 85)
+  substring_score = _longest_common_substring_score(query, playlist_name)
 
-  return max(word_score, fuzzy_score)
+  return max(word_score, substring_score)
 
 
 def _track_display_name(track: dict) -> str:
@@ -567,13 +723,63 @@ def _track_display_name(track: dict) -> str:
 
 
 def _track_score(query: str, track: dict) -> int:
+  track_name = track.get("name", "")
   artists = " ".join(artist.get("name", "") for artist in track.get("artists", []))
-  candidates = [
-    track.get("name", ""),
-    artists,
-    f"{track.get('name', '')} {artists}",
-  ]
-  return max(_playlist_score(query, candidate) for candidate in candidates)
+  structured_parts = _structured_track_query_parts(query)
+  normalized_query = _remove_adjacent_duplicate_words(_normalize_spotify_name(query))
+  normalized_track_name = _remove_adjacent_duplicate_words(_normalize_spotify_name(track_name))
+  normalized_artists = _remove_adjacent_duplicate_words(_normalize_spotify_name(artists))
+  normalized_track_with_artists = " ".join(
+    part for part in [normalized_track_name, normalized_artists]
+    if part
+  )
+
+  if not normalized_query or not normalized_track_name:
+    return 0
+
+  query_words = set(normalized_query.split())
+  track_words = set(normalized_track_name.split())
+  artist_words = set(normalized_artists.split())
+
+  track_name_score = _playlist_score(normalized_query, normalized_track_name)
+  track_with_artists_score = _playlist_score(normalized_query, normalized_track_with_artists)
+  artist_score = _playlist_score(normalized_query, normalized_artists) if normalized_artists else 0
+
+  if normalized_track_name in normalized_query:
+    track_name_score = max(track_name_score, 94)
+
+  if track_words and track_words <= query_words:
+    track_name_score = max(track_name_score, 92)
+
+  artist_bonus = 0
+  if artist_words and artist_words <= query_words:
+    artist_bonus = 8
+
+  if not structured_parts and track_name_score >= 85:
+    return min(100, max(track_name_score, track_with_artists_score) + artist_bonus)
+
+  extra_query_words = query_words - artist_words
+  if not structured_parts and artist_score >= 90 and len(extra_query_words) <= 1:
+    return artist_score
+
+  score = max(
+    track_with_artists_score,
+    int((track_name_score * 0.75) + (artist_score * 0.25)),
+  )
+
+  if structured_parts:
+    structured_score = _structured_track_assignment_score(
+      structured_parts,
+      normalized_track_name,
+      normalized_artists,
+    )
+
+    if structured_score == 0:
+      return min(score, 35)
+
+    return max(score, structured_score)
+
+  return score
 
 
 def _buscar_minha_playlist(nome: str) -> dict | None:
@@ -623,6 +829,8 @@ def _playlist_tracks(playlist: dict, limite: int = 100) -> list[dict]:
       "fields": "items(track(name,uri,artists(name))),next",
     })
     items = result.get("items", [])
+    if not isinstance(items, list):
+      break
 
     for item in items:
       track = item.get("track") or {}
@@ -635,6 +843,86 @@ def _playlist_tracks(playlist: dict, limite: int = 100) -> list[dict]:
     offset += len(items)
 
   return tracks[:limite]
+
+
+def _saved_tracks(limite: int = PERSONAL_CATALOG_SAVED_TRACK_LIMIT) -> list[dict]:
+  tracks = []
+  offset = 0
+
+  while len(tracks) < limite:
+    limit = min(50, limite - len(tracks))
+    result = _spotify_user_get("/me/tracks", {
+      "limit": limit,
+      "offset": offset,
+      "market": "BR",
+    })
+    items = result.get("items", [])
+    if not isinstance(items, list):
+      break
+
+    for item in items:
+      track = item.get("track") or {}
+      if track.get("uri"):
+        tracks.append(track)
+
+    if not result.get("next") or not items:
+      break
+
+    offset += len(items)
+
+  return tracks
+
+
+def _dedupe_tracks(tracks: list[dict]) -> list[dict]:
+  deduped_tracks = []
+  seen_uris = set()
+
+  for track in tracks:
+    uri = track.get("uri")
+    if not uri or uri in seen_uris:
+      continue
+
+    seen_uris.add(uri)
+    deduped_tracks.append(track)
+
+  return deduped_tracks
+
+
+def _personal_track_catalog() -> list[dict]:
+  expires_at = float(_personal_track_catalog_cache.get("expires_at") or 0)
+  cached_tracks = _personal_track_catalog_cache.get("tracks")
+
+  if time.time() < expires_at and isinstance(cached_tracks, list):
+    return cached_tracks
+
+  tracks = _saved_tracks(PERSONAL_CATALOG_SAVED_TRACK_LIMIT)
+
+  for playlist in _minhas_playlists(PERSONAL_CATALOG_PLAYLIST_LIMIT):
+    tracks.extend(_playlist_tracks(playlist, PERSONAL_CATALOG_PLAYLIST_TRACK_LIMIT))
+
+  tracks = _dedupe_tracks(tracks)
+  _personal_track_catalog_cache["tracks"] = tracks
+  _personal_track_catalog_cache["expires_at"] = time.time() + PERSONAL_CATALOG_TTL_SECONDS
+
+  return tracks
+
+
+def _buscar_musica_no_catalogo_pessoal(nome: str) -> dict | None:
+  try:
+    tracks = _personal_track_catalog()
+  except Exception:
+    return None
+
+  if not tracks:
+    return None
+
+  track = max(tracks, key=lambda item: _personal_track_score(nome, item))
+  best_score = _personal_track_score(nome, track)
+
+  if best_score >= MIN_PERSONAL_TRACK_MATCH_SCORE:
+    return track
+
+  return None
 
 
 def _buscar_musica_na_playlist(playlist: dict, musica: str) -> dict | None:
@@ -771,18 +1059,50 @@ def _require_spotify_device() -> str:
 
 def tocar_musica(nome: str) -> str:
   """Busca e toca uma musica no Spotify."""
-  result = _spotify_get("/search", {
-    "q": nome,
-    "type": "track",
-    "limit": 1,
-    "market": "BR",
-  })
+  personal_track = _buscar_musica_no_catalogo_pessoal(nome)
+  if personal_track is not None:
+    device_id = _require_spotify_device()
+    _spotify_user_request(
+      "/me/player/play",
+      method="PUT",
+      params={"device_id": device_id},
+      body={"uris": [personal_track["uri"]]},
+    )
 
-  tracks = result.get("tracks", {}).get("items", [])
-  if not tracks:
+    artists = ", ".join(artist["name"] for artist in personal_track.get("artists", []))
+    return f"Tocando {personal_track['name']} - {artists}."
+
+  candidates = []
+  seen_uris = set()
+
+  for search_query in _track_search_queries(nome):
+    result = _spotify_get("/search", {
+      "q": search_query,
+      "type": "track",
+      "limit": 10,
+      "market": "BR",
+    })
+
+    for track in result.get("tracks", {}).get("items", []):
+      uri = track.get("uri")
+      if uri in seen_uris:
+        continue
+
+      seen_uris.add(uri)
+      candidates.append((track, search_query))
+
+  if not candidates:
     return "Nenhuma musica encontrada."
 
-  track = tracks[0]
+  track, search_query = max(
+    candidates,
+    key=lambda item: _track_search_score(nome, item[1], item[0]),
+  )
+  best_score = _track_search_score(nome, search_query, track)
+
+  if best_score < MIN_TRACK_MATCH_SCORE:
+    return f"Nao encontrei uma musica parecida com {nome}."
+
   device_id = _require_spotify_device()
   _spotify_user_request(
     "/me/player/play",
